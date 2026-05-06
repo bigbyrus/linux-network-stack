@@ -4,35 +4,66 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 
 // The Server will produce threads to handle ONE request from a client
 
 void *handle_client(void *arg){
-    int client_fd = *(int *)arg;
-    free(arg);
-
     char buffer[1024];
+
+    // add client_fd to the thread's stack
+    int client_fd = *(int *)arg;
+    
+    // release client_fd from the heap
+    free(arg);
 
     // WAIT FOR REQUEST FROM CLIENT
     int n = recv(client_fd, buffer, sizeof(buffer), 0);
 
-    // PARSE DATA, RESPOND TO CLIENT, RELEASE ALL RESOURCES
+    // parse data, respond to client, release all resources
     if(n > 0){
         printf("Received:\n%.*s\n", n, buffer);
 
-        if(n >= 4 && strncmp(buffer, "GET ", 4) == 0){
-            const char *response =
+        char method[8];
+        char path[256];
+        char version[16];
+        char file_buffer[4096];
+        char header[256];
+
+        // extract data from HTTP request
+        sscanf(buffer, "%7s %255s %15s", method, path, version);
+
+        // initial response from server
+        if(strcmp(method, "GET") == 0 && strcmp(path, "/") == 0){
+            int fd = open("index.html", O_RDONLY);
+            int bytes = read(fd, file_buffer, sizeof(file_buffer));
+
+            sprintf(header,
                 "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 13\r\n"
-                "\r\n"
-                "Hello, world!";
+                "Content-Type: text/html\r\n"
+                "Content-Length: %d\r\n"
+                "\r\n",
+                bytes);
 
-            send(client_fd, response, strlen(response), 0);
-        } else if(n >= 4 && strncmp(buffer, "POST ", 5)){
-            // not sure 
+            send(client_fd, header, strlen(header), 0);
+            send(client_fd, file_buffer, bytes, 0);
+        } else if(strcmp(method, "GET") == 0 && strcmp(path, "/users") == 0){
 
-        } else {
+            // ADD users.html to display a dummy image
+            int fd = open("users.html", O_RDONLY);
+            int bytes = read(fd, file_buffer, sizeof(file_buffer));
+
+            sprintf(header,
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: %d\r\n"
+                "\r\n",
+                bytes);
+
+            send(client_fd, header, strlen(header), 0);
+            send(client_fd, file_buffer, bytes, 0);
+        } 
+        else {
             const char *response =
                 "HTTP/1.1 400 Bad Request\r\n"
                 "Content-Length: 11\r\n"

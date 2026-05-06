@@ -12,6 +12,45 @@
 #define SERIAL_PORT "/dev/ttyCOM8"
 #define BAUDRATE B115200
 
+/* CAMERA IS A SHARED RESOURCE */
+void *get_image_data(void *arg){ 
+        uint32_t length;
+        int fd = *(int *)arg;
+
+        // write to the serial device (file descriptor)
+        const char *cmd = "TRIGGER\n";
+        ssize_t written = write(fd, cmd, strlen(cmd));
+        tcdrain(fd);
+
+        if(written < 0)
+            perror("write");
+
+        // READ THE IMAGE DATA RECEIVED
+        if(read_exact(fd, &length, sizeof(length)) != sizeof(length))
+            perror("read length");
+        printf("Image length: %u bytes\n", length);
+
+        if(length == 0 || length > 10 * 1024 * 1024){
+            printf("Invalid length: %u\n", length);
+            printf("exiting...");
+            return 0;
+        }
+
+        
+        // USE LENGTH TO ALLOCATE MEMORY FOR BUFFER IN HEAP
+        unsigned char *buffer = malloc(length);
+        if(!buffer)
+            perror("malloc");
+
+        // STORE IMAGE DATA IN OUR BUFFER
+        if(read_exact(fd, buffer, length) != length){
+            perror("read image");
+            free(buffer);
+        }
+
+        free(buffer);
+}
+
 /* ensure that all serial data is read */
 ssize_t read_exact(int fd, void *buf, size_t count) {
     size_t total = 0;
@@ -25,6 +64,7 @@ ssize_t read_exact(int fd, void *buf, size_t count) {
 }
 
 int main() {
+
     // obtain FILE DESCRIPTOR representing the "open" Serial Device
     int fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY);
     if(fd < 0){
@@ -41,7 +81,7 @@ int main() {
         return 1;
     }
 
-    // DEFINE SERIAL PORT CONFIGURATIONS
+    // DEFINE SERIAL PORT CONFIGURATIONS (baudrate first)
     cfsetispeed(&tty, BAUDRATE);
     cfsetospeed(&tty, BAUDRATE);
 
@@ -67,55 +107,10 @@ int main() {
     printf("Serial connected\n");
 
 
+    // the "handle_client" THREAD will call this thread to QUICKLY
+    // receive an image from the camera 
 
 
-
-
-    // SEPARATE THIS INTO ITS OWN THREAD
-
-        // WRITE "TRIGGER\n" TO THE FILE 
-        uint32_t length;
-        const char *cmd = "TRIGGER\n";
-        ssize_t written = write(fd, cmd, strlen(cmd));
-        tcdrain(fd);
-
-        if(written < 0)
-            perror("write");
-
-        // READ THE IMAGE DATA RECEIVED
-        if(read_exact(fd, &length, sizeof(length)) != sizeof(length))
-            perror("read length");
-        printf("Image length: %u bytes\n", length);
-
-        if(length == 0 || length > 10 * 1024 * 1024){
-            printf("Invalid length: %u\n", length);
-            printf("exiting...");
-            return 0;
-        }
-
-        
-        // USE LENGTH TO CREATE BUFFER IN HEAP
-        unsigned char *buffer = malloc(length);
-        if(!buffer)
-            perror("malloc");
-
-        // STORE IMAGE DATA IN OUR BUFFER
-        if(read_exact(fd, buffer, length) != length){
-            perror("read image");
-            free(buffer);
-        }
-
-        // SAVE IMAGE DATA
-        FILE *fp = fopen("image.jpg", "wb");
-        if(!fp)
-            perror("fopen");
-        else{
-            fwrite(buffer, 1, length, fp);
-            fclose(fp);
-            printf("Saved image.jpg\n");
-        }
-
-    free(buffer);
     close(fd);
     return 0;
 }
