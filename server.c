@@ -3,10 +3,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <arpa/inet.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <sys/stat.h>
 
-// The Server will produce threads to handle ONE request from a client
+// The Server will produce a new thread for EVERY HTTP request from clients
 
 void *handle_client(void *arg){
     char buffer[1024];
@@ -47,6 +48,8 @@ void *handle_client(void *arg){
 
             send(client_fd, header, strlen(header), 0);
             send(client_fd, file_buffer, bytes, 0);
+
+        // after clicking the "Users" button
         } else if(strcmp(method, "GET") == 0 && strcmp(path, "/users") == 0){
 
             // ADD users.html to display a dummy image
@@ -62,7 +65,35 @@ void *handle_client(void *arg){
 
             send(client_fd, header, strlen(header), 0);
             send(client_fd, file_buffer, bytes, 0);
-        } 
+
+        // provide image to client
+        } else if(strcmp(method, "GET") == 0 && strcmp(path, "/image.jpg") == 0){
+            int fd = open("image.jpg", O_RDONLY);
+
+            // get file size
+            struct stat st;
+            fstat(fd, &st);
+            int file_size = st.st_size;
+
+            // tell browser how many bytes to expect
+            sprintf(header,
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: image/jpeg\r\n"
+                "Content-Length: %d\r\n"
+                "\r\n",
+                file_size);
+
+            send(client_fd, header, strlen(header), 0);
+
+            int n;
+
+            // continuously stream data until entire FILE is sent
+            while((n = read(fd, buffer, sizeof(buffer))) > 0) {
+                send(client_fd, buffer, n, 0);
+            }
+
+            close(fd);
+        }
         else {
             const char *response =
                 "HTTP/1.1 400 Bad Request\r\n"
