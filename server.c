@@ -1,9 +1,19 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 #include <pthread.h>
 #include <arpa/inet.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+
+// Unix specific libraries (program will not work on Windows)
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <errno.h>
+
+#define SERIAL_PORT "/dev/ttyUSB0"
+#define BAUDRATE B115200
 
 // The Server will produce threads to handle ONE request from a client
 
@@ -20,18 +30,43 @@ void *handle_client(void *arg){
     if(n > 0){
         printf("Received:\n%.*s\n", n, buffer);
 
-        if(n >= 4 && strncmp(buffer, "GET ", 4) == 0){
-            const char *response =
+        char method[8];
+        char path[256];
+        char version[16];
+        char file_buffer[4096];
+        char header[256];
+
+        // extract data from HTTP request
+        sscanf(buffer, "%7s %255s %15s", method, path, version);
+
+        if(strcmp(method, "GET") == 0 && strcmp(path, "/") == 0){
+            int fd = open("index.html", O_RDONLY);
+            int bytes = read(fd, file_buffer, sizeof(file_buffer));
+
+            sprintf(header,
                 "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 13\r\n"
-                "\r\n"
-                "Hello, world!";
+                "Content-Type: text/html\r\n"
+                "Content-Length: %d\r\n"
+                "\r\n",
+                bytes);
 
-            send(client_fd, response, strlen(response), 0);
-        } else if(n >= 4 && strncmp(buffer, "POST ", 5)){
-            // not sure 
+            send(client_fd, header, strlen(header), 0);
+            send(client_fd, file_buffer, bytes, 0);
+        
+        // show a picture from the camera module
+        } else if(strcmp(method, "GET") == 0 && strcmp(path, "/pic") == 0){
+            int fd = open("users.html", O_RDONLY);
+            int bytes = read(fd, file_buffer, sizeof(file_buffer));
 
+            sprintf(header,
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: %d\r\n"
+                "\r\n",
+                bytes);
+
+            send(client_fd, header, strlen(header), 0);
+            send(client_fd, file_buffer, bytes, 0);
         } else {
             const char *response =
                 "HTTP/1.1 400 Bad Request\r\n"
@@ -48,6 +83,49 @@ void *handle_client(void *arg){
 }
 
 int main() {
+    // need to close serial port at some point...
+    int fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY);
+    if(fd < 0){
+        perror("open");
+        return 1;
+    }
+
+    // serial port config struct
+    struct termios tty;
+
+    // obtain the current port configurations
+    if(tcgetattr(fd, &tty) != 0) {
+        perror("tcgetattr");
+        return 1;
+    }
+
+    // DEFINE SERIAL PORT CONFIGURATIONS
+    cfsetispeed(&tty, BAUDRATE);
+    cfsetospeed(&tty, BAUDRATE);
+
+    // Configure 8N1 (8 data bits, no parity, 1 stop bit)
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag |= CREAD | CLOCAL;
+
+    tty.c_lflag = 0;
+    tty.c_oflag = 0;
+    tty.c_iflag = 0;
+    tty.c_cc[VMIN]  = 1;
+    tty.c_cc[VTIME] = 0;
+
+
+    // UPDATE SERIAL PORT CONFIGURATIONS
+    if(tcsetattr(fd, TCSANOW, &tty) != 0){
+        perror("tcsetattr");
+        return 1;
+    }
+    printf("Serial connected\n");
+
+
+
     // ESTABLISH PORT AND IP FOR THIS APPLICATION
     struct sockaddr_in addr;
     int server_fd;
