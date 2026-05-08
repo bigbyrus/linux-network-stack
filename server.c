@@ -55,7 +55,7 @@ void *handle_client(void *arg){
         
         // show a picture from the camera module
         } else if(strcmp(method, "GET") == 0 && strcmp(path, "/pic") == 0){
-            int fd = open("users.html", O_RDONLY);
+            int fd = open("pic.html", O_RDONLY);
             int bytes = read(fd, file_buffer, sizeof(file_buffer));
 
             sprintf(header,
