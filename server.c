@@ -6,17 +6,23 @@
 #include <stdint.h>
 #include <string.h>
 
-// Unix specific libraries (program will not work on Windows)
+// Unix specific libraries (no Windows)
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <errno.h>
 
+// global
 #define SERIAL_PORT "/dev/ttyUSB0"
 #define BAUDRATE B115200
+pthread_mutex_t camera_lock = PTHREAD_MUTEX_INITIALIZER;
+int serial_fd;
+
 
 // The Server will produce threads to handle ONE request from a client
 
+// Every individual HTTP request we receive from a client
+// gets its own thread
 void *handle_client(void *arg){
     int client_fd = *(int *)arg;
     free(arg);
@@ -74,48 +80,8 @@ void *handle_client(void *arg){
             send(client_fd, file_buffer, bytes, 0);
 
         // send raw image data from CAMERA to BROWSER
-        } else if(strcmp(path, "/image.jpg")){
-
-            // open serial port, obtain file descriptor for read/write
-            int serial_fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY);
-            if(serial_fd < 0){
-                perror("open");
-                return 1;
-            }
-
-            // serial port config struct
-            struct termios tty;
-
-            // obtain the current port configurations
-            if(tcgetattr(serial_fd, &tty) != 0) {
-                perror("tcgetattr");
-                return 1;
-            }
-
-            // DEFINE SERIAL PORT CONFIGURATIONS
-            cfsetispeed(&tty, BAUDRATE);
-            cfsetospeed(&tty, BAUDRATE);
-
-            // Configure 8 data bits, no parity, 1 stop bit
-            tty.c_cflag &= ~PARENB;
-            tty.c_cflag &= ~CSTOPB;
-            tty.c_cflag &= ~CSIZE;
-            tty.c_cflag |= CS8;
-            tty.c_cflag |= CREAD | CLOCAL;
-
-            tty.c_lflag = 0;
-            tty.c_oflag = 0;
-            tty.c_iflag = 0;
-            tty.c_cc[VMIN]  = 1;
-            tty.c_cc[VTIME] = 0;
-
-
-            // UPDATE SERIAL PORT CONFIGURATIONS
-            if(tcsetattr(serial_fd, TCSANOW, &tty) != 0){
-                perror("tcsetattr");
-                return 1;
-            }
-            printf("Serial connected\n");
+        } else if(strcmp(path, "/image.jpg") == 0){
+            pthread_mutex_lock(&camera_lock);
             
             // WRITE "TRIGGER\n" TO THE FILE
             uint32_t length;
@@ -124,8 +90,11 @@ void *handle_client(void *arg){
             tcdrain(serial_fd);
 
             // just in case
-            if(written < 0)
-                perror("write");
+            if(written < 0){
+                perror("write");   
+                pthread_mutex_unlock(&camera_lock);
+                return 0; // maybe just "return;" ?
+            }
 
             // obtain the length image data 
             read_exact(serial_fd, &length, sizeof(length));
@@ -135,13 +104,12 @@ void *handle_client(void *arg){
             if(length == 0 || length > 10 * 1024 * 1024){
                 printf("Invalid length: %u\n", length);
                 printf("exiting...");
+                pthread_mutex_unlock(&camera_lock);
                 return 0;
             }
 
             // allocate 4KB on heap to STREAM image data 
             unsigned char *buf = malloc(4096);
-            if(!buffer)
-                perror("malloc");
 
             // send header to client, use LENGTH so browser can display image
             sprintf(header,
@@ -153,8 +121,18 @@ void *handle_client(void *arg){
             send(client_fd, header, strlen(header), 0);
 
             // STREAM image data to client
-            while((n = read(serial_fd, buf, sizeof(buffer))) > 0){
-                send(client_fd, buffer, n, 0);
+            uint32_t remaining = length;
+
+            while(remaining > 0) {
+                int chunk = remaining > 4096 ? 4096 : remaining;
+                n = read_exact(serial_fd, buf, chunk);
+                if(n <= 0) {
+                    printf("error..");
+                    pthread_mutex_unlock(&camera_lock);
+                    break;
+                }
+                send(client_fd, buf, n, 0);
+                remaining -= n;
             }
         }
         else {
@@ -168,6 +146,7 @@ void *handle_client(void *arg){
         }
     }
 
+    pthread_mutex_unlock(&camera_lock);
     close(client_fd);
     return NULL;
 }
@@ -206,6 +185,47 @@ int main() {
     printf("Listening on port 8080...\n");
 
 
+    // need to close this...
+    serial_fd = open(SERIAL_PORT, O_RDWR | O_NOCTTY);
+    if(serial_fd < 0){
+        perror("open");
+        return 1;
+    }
+
+    // serial port config struct
+    struct termios tty;
+
+    // obtain the current port configurations
+    if(tcgetattr(serial_fd, &tty) != 0) {
+        perror("tcgetattr");
+        return 1;
+    }
+
+    // DEFINE SERIAL PORT CONFIGURATIONS
+    cfsetispeed(&tty, BAUDRATE);
+    cfsetospeed(&tty, BAUDRATE);
+
+    // Configure 8 data bits, no parity, 1 stop bit
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag |= CREAD | CLOCAL;
+
+    tty.c_lflag = 0;
+    tty.c_oflag = 0;
+    tty.c_iflag = 0;
+    tty.c_cc[VMIN]  = 1;
+    tty.c_cc[VTIME] = 0;
+
+
+    // UPDATE SERIAL PORT CONFIGURATIONS
+    if(tcsetattr(serial_fd, TCSANOW, &tty) != 0){
+        perror("tcsetattr");
+        return 1;
+    }
+    printf("Serial connected\n");
+
     // BEGIN CREATING THREADS FOR EACH TCP CONNECTION ESTABLISHED
     while(1){
 
@@ -223,6 +243,7 @@ int main() {
         pthread_detach(tid);
     }
 
+    close(serial_fd);
     close(server_fd);
     return 0;
 }
