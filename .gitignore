@@ -3,3 +3,7 @@ terminal-io-funcs.h
 file-control-funcs.h
 string_funcs.h
 
+serial.c
+serve
+test.c
+um
