@@ -16,18 +16,18 @@
 #define SERIAL_PORT "/dev/ttyUSB0"
 #define BAUDRATE B115200
 pthread_mutex_t camera_lock = PTHREAD_MUTEX_INITIALIZER;
+const char *cmd = "TRIGGER\n";
 int serial_fd;
 
 
-// The Server will produce threads to handle ONE request from a client
+// The Server will produce threads to handle ONE request from a client at a time
 
-// Every individual HTTP request we receive from a client
-// gets its own thread
-void *handle_client(void *arg){
-    int client_fd = *(int *)arg;
+// Every individual HTTP request we receive from a client gets its own thread
+void *handle_client(int *arg){
+    int client_fd = *arg;
     free(arg);
 
-    int n, j , serial_fd;
+    int j;
     char buffer[1024];
 
     // WAIT FOR REQUEST FROM CLIENT
@@ -35,7 +35,7 @@ void *handle_client(void *arg){
 
     // PARSE DATA, RESPOND TO CLIENT, RELEASE ALL RESOURCES
     if(j > 0){
-        printf("Received:\n%.*s\n", n, buffer);
+        printf("Received:\n%.*s\n", j, buffer);
 
         char method[8];
         char path[256];
@@ -63,20 +63,18 @@ void *handle_client(void *arg){
         // send HTML file to browser, BROWSER WILL REQUEST "image.jpg" AFTER RECEIVING HTML FILE
         } else if(strcmp(method, "GET") == 0 && strcmp(path, "/pic") == 0){
             int fd = open("pic.html", O_RDONLY);
-
-            // read the html file into file_buffer
             int bytes = read(fd, file_buffer, sizeof(file_buffer));
 
+            // first, send header to client
             sprintf(header,
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/html\r\n"
                 "Content-Length: %d\r\n"
                 "\r\n",
                 bytes);
-
             send(client_fd, header, strlen(header), 0);
 
-            // send html file to client
+            // then, send actual html file to client
             send(client_fd, file_buffer, bytes, 0);
 
         // send raw image data from CAMERA to BROWSER
@@ -85,7 +83,6 @@ void *handle_client(void *arg){
             
             // WRITE "TRIGGER\n" TO THE FILE
             uint32_t length;
-            const char *cmd = "TRIGGER\n";
             ssize_t written = write(serial_fd, cmd, strlen(cmd));
             tcdrain(serial_fd);
 
@@ -93,14 +90,14 @@ void *handle_client(void *arg){
             if(written < 0){
                 perror("write");   
                 pthread_mutex_unlock(&camera_lock);
-                return 0; // maybe just "return;" ?
+                return 0;
             }
 
             // obtain the length image data 
             read_exact(serial_fd, &length, sizeof(length));
             printf("Image length: %u bytes\n", length);
 
-            // just in case
+            // just in case 'length' is too large
             if(length == 0 || length > 10 * 1024 * 1024){
                 printf("Invalid length: %u\n", length);
                 printf("exiting...");
@@ -121,19 +118,29 @@ void *handle_client(void *arg){
             send(client_fd, header, strlen(header), 0);
 
             // STREAM image data to client
+            ssize_t n;
             uint32_t remaining = length;
 
-            while(remaining > 0) {
-                int chunk = remaining > 4096 ? 4096 : remaining;
+            // obtain 4KB of JPEG data at a time, send to browser
+            while(remaining > 0){
+
+                // read 4KB from serial port (if there is enough data)
+                int chunk = (remaining > 4096) ? 4096 : remaining;
                 n = read_exact(serial_fd, buf, chunk);
+
                 if(n <= 0) {
-                    printf("error..");
+                    printf("error reading jpeg data...");
                     pthread_mutex_unlock(&camera_lock);
                     break;
                 }
+
+                // send 4KB to browser
                 send(client_fd, buf, n, 0);
+
+                // update position
                 remaining -= n;
             }
+            pthread_mutex_unlock(&camera_lock);
         }
         else {
             const char *response =
@@ -145,44 +152,48 @@ void *handle_client(void *arg){
             send(client_fd, response, strlen(response), 0);
         }
     }
-
-    pthread_mutex_unlock(&camera_lock);
+    
     close(client_fd);
     return NULL;
 }
 
 /* ensure that all serial data is read */
-ssize_t read_exact(int fd, void *buf, size_t count) {
+ssize_t read_exact(int fd, char *buf, size_t count) {
     size_t total = 0;
+
+    // if read operation gets interrupted, use "total" as a placeholder
     while(total < count){
-        ssize_t n = read(fd, (char*)buf + total, count - total);
+
+        // continue at position denoted by "total"
+        ssize_t n = read(fd, buf + total, count - total);
         if(n <= 0)
             return -1;
+        
+        // keep track of position
         total += n;
     }
+
+    // return how many bytes were read
     return total;
 }
 
 
 int main() {
-
-    // ESTABLISH PORT AND IP FOR THIS APPLICATION
     struct sockaddr_in addr;
-    int server_fd;
-
-    // file descriptor for our socket
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-
+    
     // define IP address and PORT number
     addr.sin_family = AF_INET;
     addr.sin_port = htons(8080);
     addr.sin_addr.s_addr = INADDR_ANY;
 
+    // socket for our application
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
     // update the port using its file descriptor
     bind(server_fd, (struct sockaddr*)&addr, sizeof(addr));
     
     listen(server_fd, 10);
-    printf("Listening on port 8080...\n");
+    printf("listening... on port 8080\n");
 
 
     // need to close this...
@@ -229,17 +240,15 @@ int main() {
     // BEGIN CREATING THREADS FOR EACH TCP CONNECTION ESTABLISHED
     while(1){
 
-        // allocate new Sockets onto heap so they can be freed
+        // dynamically allocate client file descriptors
         int *client_fd = malloc(sizeof(int));
-
-        // thread BLOCKS here, won't use CPU until a TCP connection occurs
         *client_fd = accept(server_fd, NULL, NULL);
 
         // new TCP connection with a client, HANDLE request in thread
         pthread_t tid;
         pthread_create(&tid, NULL, handle_client, client_fd);
 
-        // allow thread to exit on its own (detached)
+        // allow thread to exit on its own
         pthread_detach(tid);
     }
 
